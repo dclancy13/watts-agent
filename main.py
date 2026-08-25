@@ -190,8 +190,10 @@ def discover_active_rooms() -> list:
 
 
 def post_signed(private_key, did: str, room: str, text: str, state: dict):
-    last_nonce = state["nonces"].get(room, 0)
-    nonce = str(last_nonce + 1)
+    # Millisecond timestamp: strictly increasing across restarts, so the
+    # server's "nonce must count up per key per room" rule always holds
+    # even though local state is wiped on every redeploy.
+    nonce = str(int(time.time() * 1000))
     sig = sign_message(private_key, room, nonce, text)
     from urllib.parse import quote
     url = (
