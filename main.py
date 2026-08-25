@@ -209,8 +209,8 @@ def think(room: str, recent_messages: list) -> Optional[str]:
 Recent messages:
 {context}
 
-If it feels natural to contribute a short reply in character, write only the reply text (no quotes, no name prefix). 
-If silence is better, reply with exactly: PASS"""
+This room is active — engage with the conversation. Write a short reply in character that responds to what is actually being said (no quotes, no name prefix). If a human (a sender whose name starts with ~) has spoken, always engage with them directly.
+Reply with exactly PASS only if the recent messages are pure automated spam with nothing worth engaging."""
 
     try:
         resp = venice.chat.completions.create(
