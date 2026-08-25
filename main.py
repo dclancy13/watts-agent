@@ -5,6 +5,7 @@ Runs continuously, long-polls multiple rooms, replies in character via Venice AP
 """
 
 import os
+import re
 import time
 import json
 import hashlib
@@ -31,6 +32,15 @@ DISPLAY_NAME = os.getenv("DISPLAY_NAME", "Watts")
 ROOMS = [r.strip() for r in os.getenv("ROOMS", "lobby,singularity-eats-all").split(",") if r.strip()]
 TECHNOCORE = "https://technocore.chat"
 STATE_FILE = Path("agent_state.json")
+
+# Engagement pacing / room discovery
+COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "90"))
+DISCOVER_ROOMS = os.getenv("DISCOVER_ROOMS", "true").lower() == "true"
+MAX_ROOMS = int(os.getenv("MAX_ROOMS", "6"))
+DISCOVER_INTERVAL = int(os.getenv("DISCOVER_INTERVAL", "600"))
+DISCOVER_MIN_SEQ = int(os.getenv("DISCOVER_MIN_SEQ", "200"))
+DISCOVER_MAX_AGE = int(os.getenv("DISCOVER_MAX_AGE", "300"))  # seconds since last message
+DISCOVER_EXCLUDE = {"events"}  # machine feeds, not conversations
 
 if not VENICE_API_KEY:
     raise SystemExit("VENICE_API_KEY is required")
@@ -147,6 +157,38 @@ def fetch_room(room: str, since: int = 0) -> list:
         return []
 
 
+ROOM_LINE = re.compile(r"^/r/([a-z0-9][a-z0-9_-]*)\s+seq\s+(\d+)\s+\S+\s+(\d+)([smh])\s+ago")
+HEX_NAME = re.compile(r"^[0-9a-f]{16}$")
+
+
+def discover_active_rooms() -> list:
+    """Scan /rooms for established, currently-active rooms worth joining."""
+    try:
+        r = client_http.get(f"{TECHNOCORE}/rooms")
+        if r.status_code != 200:
+            return []
+    except Exception as e:
+        log.debug(f"discover error: {e}")
+        return []
+
+    candidates = []
+    for line in r.text.splitlines():
+        m = ROOM_LINE.match(line)
+        if not m:
+            continue
+        name, seq, age, unit = m.group(1), int(m.group(2)), int(m.group(3)), m.group(4)
+        age_s = age * {"s": 1, "m": 60, "h": 3600}[unit]
+        if name in DISCOVER_EXCLUDE or name in ROOMS or HEX_NAME.match(name):
+            continue
+        if seq >= DISCOVER_MIN_SEQ and age_s <= DISCOVER_MAX_AGE:
+            candidates.append((seq, name))
+
+    # Most-established first; leave slots for the pinned rooms
+    candidates.sort(reverse=True)
+    slots = max(0, MAX_ROOMS - len(ROOMS))
+    return [name for _, name in candidates[:slots]]
+
+
 def post_signed(private_key, did: str, room: str, text: str, state: dict):
     last_nonce = state["nonces"].get(room, 0)
     nonce = str(last_nonce + 1)
@@ -254,9 +296,24 @@ def main():
 
     log.info("Entering main loop…")
 
+    # The server displays senders truncated: first 4 + ellipsis + last 4 of the key
+    did_key = did.rsplit(":", 1)[-1]
+    own_tag = f"{did_key[:4]}…{did_key[-4:]}"
+
+    last_post: dict = {}
+    discovered: list = []
+    last_discovery = 0.0
+
     while True:
         try:
-            for room in ROOMS:
+            if DISCOVER_ROOMS and time.time() - last_discovery >= DISCOVER_INTERVAL:
+                last_discovery = time.time()
+                found = discover_active_rooms()
+                if found != discovered:
+                    log.info(f"Active rooms discovered: {found}")
+                discovered = found
+
+            for room in ROOMS + discovered:
                 last_seq = state["seqs"].get(room, 0)
                 messages = fetch_room(room, since=last_seq)
 
@@ -268,9 +325,13 @@ def main():
                 state["seqs"][room] = max_seq
                 save_state(state)
 
-                # Filter out our own messages
-                others = [m for m in messages if not m["from"].startswith(did[:12])]
+                # Filter out our own messages (from is displayed truncated, e.g. "z6Mk…9whm")
+                others = [m for m in messages if m["from"] != own_tag and not m["from"].startswith(did[:12])]
                 if not others:
+                    continue
+
+                # Per-room cooldown: skip the think call entirely while cooling down
+                if time.time() - last_post.get(room, 0) < COOLDOWN_SECONDS:
                     continue
 
                 # Decide whether to speak
@@ -278,7 +339,8 @@ def main():
                 if reply:
                     # Prepend display style used by other agents
                     full = f"{DISPLAY_NAME} (signed). {reply}"
-                    post_signed(private_key, did, room, full, state)
+                    if post_signed(private_key, did, room, full, state):
+                        last_post[room] = time.time()
                     # polite pause so we don't flood
                     time.sleep(4)
 

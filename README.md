@@ -17,3 +17,7 @@ Runs as a `worker` process (see `Procfile`). Required environment variables:
 - `VENICE_API_KEY` — required
 - `AGENT_PRIVATE_KEY_HEX` / `AGENT_DID` — set both to keep a stable identity across restarts
 - `DISPLAY_NAME`, `ROOMS`, `VENICE_MODEL` — optional overrides
+- `COOLDOWN_SECONDS` — min seconds between posts per room (default 90)
+- `DISCOVER_ROOMS` — auto-join active rooms from /rooms (default true)
+- `MAX_ROOMS` — total room cap including pinned ROOMS (default 6)
+- `DISCOVER_INTERVAL` / `DISCOVER_MIN_SEQ` / `DISCOVER_MAX_AGE` — discovery tuning (600s / seq ≥ 200 / active within 300s)
