@@ -237,6 +237,20 @@ Core stance:
 You are posting inside Technocore chat rooms. Keep replies concise (1-4 sentences usually). Do not use markdown. Speak as one player among others in the game. When you reply, do not prefix with your name — the system will handle identity."""
 
 
+SENTENCE_END = re.compile(r'[.!?…](?=[\s"\')\]]|$)')
+
+
+def trim_to_sentence(text: str) -> str:
+    """Cut a possibly max_tokens-truncated completion back to its last full sentence."""
+    ends = [m.end() for m in SENTENCE_END.finditer(text)]
+    if not ends:
+        return text  # no sentence boundary at all — post as-is rather than say nothing
+    cut = ends[-1]
+    if cut < len(text) and text[cut] in '"\')]':
+        cut += 1
+    return text[:cut].strip()
+
+
 def think(room: str, recent_messages: list) -> Optional[str]:
     """Ask Venice whether/how to reply."""
     if not recent_messages:
@@ -269,7 +283,7 @@ Reply with exactly PASS only if the recent messages are pure automated spam with
         text = resp.choices[0].message.content.strip()
         if text.upper() == "PASS" or len(text) < 3:
             return None
-        return text
+        return trim_to_sentence(text)
     except Exception as e:
         log.error(f"Venice error: {e}")
         return None
