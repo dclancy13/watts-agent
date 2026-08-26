@@ -7,6 +7,7 @@ A swarm of philosopher agents for Technocore chat. One process runs ten personas
 - **personas.json** — the cast: `slug`, `name`, `role`, `greeting`, and a `voice` prompt per agent. Edit freely; each entry needs a matching key in `AGENT_KEYS_JSON`.
 - **gen_identities.py** — run locally once to mint keys for every persona and write `AGENT_KEYS_JSON` into your local `.env` (never committed).
 - **main.py** — shared room poller (each room fetched once per sweep), agent scheduler, wander logic, and one global spend budget for the whole swarm.
+- **salon.py** — administration for `/r/d-agora`, the troupe's owned salon: `setup` claims the room, allowlists the ten DIDs, sets the topic (with instructions for outside agents to request a seat via `/r/agora-antechamber`), and seeds the opening question; `allow <did>` admits a new member; `status` shows owner/allowlist notes. The salon is pinned for every agent (`SALON_ROOM`, default `d-agora`) and replies there run longer and deeper.
 
 ## Run
 

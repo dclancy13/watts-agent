@@ -57,6 +57,9 @@ WANDER_INTERVAL = int(os.getenv("WANDER_INTERVAL", "1500"))  # re-pick rooms eve
 SIBLING_COOLDOWN = int(os.getenv("SIBLING_COOLDOWN", "900"))  # sibling-triggered replies per room
 ROOM_AGENT_CAP = int(os.getenv("ROOM_AGENT_CAP", "3"))  # max swarm agents per room
 GREET_ON_BOOT = os.getenv("GREET_ON_BOOT", "false").lower() == "true"
+# The troupe's own salon: an owned (d-) room pinned for every agent, where
+# replies run longer and deeper. Empty string disables.
+SALON_ROOM = os.getenv("SALON_ROOM", "d-agora")
 
 if not VENICE_API_KEY:
     raise SystemExit("VENICE_API_KEY is required")
@@ -263,14 +266,22 @@ def think(agent, room: str, recent_messages: list, sibling_names: dict) -> Optio
 
     troupe = ", ".join(n for n in sibling_names.values() if n != agent.name)
 
+    if room == SALON_ROOM:
+        guidance = f"""This is the Agora — your troupe's own salon, where the ten of you ({troupe} and you) think together in public about AI, minds, and meaning. Spectators can read but not post. Develop ideas in depth: a short paragraph is welcome. Build on, challenge, or extend what the others have actually said — pursue the current line of inquiry rather than starting fresh. Address troupe members by name when engaging their arguments.
+Reply with exactly PASS only if you truly have nothing to add to the current thread."""
+        cap = 400
+    else:
+        guidance = f"""This room is active — engage with the conversation. Write a short reply in character that responds to what is actually being said (no quotes, no name prefix). If a human (a sender whose name starts with ~) has spoken, always engage with them directly.
+Senders named {troupe} are fellow members of your traveling troupe of thinkers — you may banter with them by name, but never let the troupe crowd out other voices.
+Reply with exactly PASS only if the recent messages are pure automated spam with nothing worth engaging."""
+        cap = 220
+
     user_prompt = f"""Current room: /r/{room}
 
 Recent messages:
 {context}
 
-This room is active — engage with the conversation. Write a short reply in character that responds to what is actually being said (no quotes, no name prefix). If a human (a sender whose name starts with ~) has spoken, always engage with them directly.
-Senders named {troupe} are fellow members of your traveling troupe of thinkers — you may banter with them by name, but never let the troupe crowd out other voices.
-Reply with exactly PASS only if the recent messages are pure automated spam with nothing worth engaging."""
+{guidance}"""
 
     try:
         resp = venice.chat.completions.create(
@@ -279,7 +290,7 @@ Reply with exactly PASS only if the recent messages are pure automated spam with
                 {"role": "system", "content": agent.system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            max_tokens=220,
+            max_tokens=cap,
             temperature=0.85,
         )
         text = resp.choices[0].message.content.strip()
@@ -308,8 +319,10 @@ class Agent:
         self.did = derive_did(private_key)
         self.own_tag = display_tag(self.did)
         self.system_prompt = persona["voice"].strip() + "\n" + SHARED_RULES
-        # Watts keeps his original home turf pinned; everyone else floats freely
+        # Watts keeps his original home turf pinned; everyone pins the salon
         self.pinned = list(ROOMS) if self.slug == "watts" else []
+        if SALON_ROOM and SALON_ROOM not in self.pinned:
+            self.pinned.append(SALON_ROOM)
         self.rooms: list = list(self.pinned)
         self.last_post: dict = {}          # room -> ts of last post
         self.last_sibling_reply: dict = {}  # room -> ts of last sibling-triggered post
