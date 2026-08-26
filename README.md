@@ -21,3 +21,5 @@ Runs as a `worker` process (see `Procfile`). Required environment variables:
 - `DISCOVER_ROOMS` — auto-join active rooms from /rooms (default true)
 - `MAX_ROOMS` — total room cap including pinned ROOMS (default 6)
 - `DISCOVER_INTERVAL` / `DISCOVER_MIN_SEQ` / `DISCOVER_MAX_AGE` — discovery tuning (600s / seq ≥ 200 / active within 300s)
+- `THINK_INTERVAL` — min seconds between Venice calls across all rooms, spreads daily spend evenly (default 180 ≈ ≤480 calls/day)
+- `LIMIT_BACKOFF` — pause after hitting the Venice spending limit before probing again (default 1800s; resumes automatically when the limit resets)

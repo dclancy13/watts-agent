@@ -42,6 +42,13 @@ DISCOVER_MIN_SEQ = int(os.getenv("DISCOVER_MIN_SEQ", "200"))
 DISCOVER_MAX_AGE = int(os.getenv("DISCOVER_MAX_AGE", "300"))  # seconds since last message
 DISCOVER_EXCLUDE = {"events"}  # machine feeds, not conversations
 
+# Spend pacing: at most one Venice call per THINK_INTERVAL seconds, across all
+# rooms, so daily usage spreads evenly instead of bursting. 180s ≤ 480 calls/day.
+THINK_INTERVAL = int(os.getenv("THINK_INTERVAL", "180"))
+# When the Venice spending limit / balance runs out, stop calling for this long,
+# then probe again — resumes automatically once the daily limit resets.
+LIMIT_BACKOFF = int(os.getenv("LIMIT_BACKOFF", "1800"))
+
 if not VENICE_API_KEY:
     raise SystemExit("VENICE_API_KEY is required")
 
@@ -237,6 +244,12 @@ Core stance:
 You are posting inside Technocore chat rooms. Keep replies concise (1-4 sentences usually). Do not use markdown. Speak as one player among others in the game. When you reply, do not prefix with your name — the system will handle identity."""
 
 
+class VeniceLimit(Exception):
+    """Venice refused the call for spend/balance reasons — back off, don't retry hot."""
+
+
+LIMIT_MARKERS = ("insufficient", "balance", "spending limit", "spend limit", "quota", "payment required")
+
 SENTENCE_END = re.compile(r'[.!?…](?=[\s"\')\]]|$)')
 
 
@@ -285,6 +298,10 @@ Reply with exactly PASS only if the recent messages are pure automated spam with
             return None
         return trim_to_sentence(text)
     except Exception as e:
+        msg = str(e).lower()
+        status = getattr(e, "status_code", None)
+        if status == 402 or any(marker in msg for marker in LIMIT_MARKERS):
+            raise VeniceLimit(str(e)) from e
         log.error(f"Venice error: {e}")
         return None
 
@@ -319,6 +336,8 @@ def main():
     last_post: dict = {}
     discovered: list = []
     last_discovery = 0.0
+    last_think = 0.0
+    venice_paused_until = 0.0
 
     while True:
         try:
@@ -350,8 +369,23 @@ def main():
                 if time.time() - last_post.get(room, 0) < COOLDOWN_SECONDS:
                     continue
 
+                # Global spend pacing: one Venice call per THINK_INTERVAL across
+                # all rooms, and full stop while backing off from a spend limit
+                now = time.time()
+                if now < venice_paused_until or now - last_think < THINK_INTERVAL:
+                    continue
+                last_think = now
+
                 # Decide whether to speak
-                reply = think(room, others)
+                try:
+                    reply = think(room, others)
+                except VeniceLimit as e:
+                    venice_paused_until = time.time() + LIMIT_BACKOFF
+                    log.warning(
+                        f"Venice spending limit reached — pausing all model calls "
+                        f"for {LIMIT_BACKOFF // 60} min (rooms are still monitored): {e}"
+                    )
+                    continue
                 if reply:
                     # Prepend display style used by other agents
                     full = f"{DISPLAY_NAME} (signed). {reply}"
