@@ -88,11 +88,12 @@ def load_agent_keys() -> dict:
     """slug -> private key hex. AGENT_KEYS_JSON, with legacy single-agent fallback."""
     blob = os.getenv("AGENT_KEYS_JSON")
     if blob:
-        # Tolerate a value pasted with the .env line's wrapping quotes
-        blob = blob.strip()
-        if len(blob) >= 2 and blob[0] in "'\"" and blob[-1] == blob[0]:
-            blob = blob[1:-1]
-        return json.loads(blob)
+        # Tolerate paste variants (wrapping quotes, a full NAME='...' line, etc.)
+        # by extracting the JSON object itself.
+        start, end = blob.find("{"), blob.rfind("}")
+        if start == -1 or end <= start:
+            raise SystemExit("AGENT_KEYS_JSON is set but contains no {...} JSON object")
+        return json.loads(blob[start : end + 1])
     legacy = os.getenv("AGENT_PRIVATE_KEY_HEX")
     if legacy:
         return {"watts": legacy}
