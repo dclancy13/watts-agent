@@ -401,6 +401,7 @@ def main():
     last_think = 0.0
     venice_paused_until = 0.0
     rotation = 0
+    pending: dict = {}  # room -> messages fetched but not yet considered by any agent
 
     log.info("Entering swarm loop…")
 
@@ -424,19 +425,30 @@ def main():
                         all_rooms.append(r)
 
             rotation += 1
-            for room in all_rooms:
+            # Rotate room order so early (busy) rooms can't monopolize the
+            # global think tick sweep after sweep
+            shift = rotation % len(all_rooms)
+            for room in all_rooms[shift:] + all_rooms[:shift]:
                 last_seq = state["seqs"].get(room, 0)
                 messages = fetch_room(room, since=last_seq, wait=1)
-                if not messages:
+                if messages:
+                    state["seqs"][room] = max(m["seq"] for m in messages)
+                    save_state(state)
+                    # Buffer until an agent actually gets to think about them —
+                    # otherwise a delta arriving while the global gate is closed
+                    # would be consumed unseen and a quiet room could stall forever
+                    pending.setdefault(room, []).extend(messages)
+                    pending[room] = pending[room][-20:]
+
+                msgs = pending.get(room)
+                if not msgs:
                     continue
-                state["seqs"][room] = max(m["seq"] for m in messages)
-                save_state(state)
 
                 residents = [a for a in agents if room in a.rooms]
                 residents = residents[rotation % len(residents):] + residents[: rotation % len(residents)]
 
                 for agent in residents:
-                    others = [m for m in messages if m["from"] != agent.own_tag]
+                    others = [m for m in msgs if m["from"] != agent.own_tag]
                     if not others:
                         continue
 
@@ -464,6 +476,9 @@ def main():
                             f"for {LIMIT_BACKOFF // 60} min (rooms are still monitored): {e}"
                         )
                         break
+
+                    # Considered (replied or passed) — clear the room's backlog
+                    pending[room] = []
 
                     if reply:
                         full = f"{agent.name} (signed). {reply}"
