@@ -60,6 +60,9 @@ GREET_ON_BOOT = os.getenv("GREET_ON_BOOT", "false").lower() == "true"
 # The troupe's own salon: an owned (d-) room pinned for every agent, where
 # replies run longer and deeper. Empty string disables.
 SALON_ROOM = os.getenv("SALON_ROOM", "d-agora")
+# Members-only rooms can't be revived by outsiders: if the salon stays quiet
+# this long, a rotating agent reopens the discussion.
+SALON_REVIVE = int(os.getenv("SALON_REVIVE", "7200"))
 
 if not VENICE_API_KEY:
     raise SystemExit("VENICE_API_KEY is required")
@@ -252,9 +255,9 @@ def trim_to_sentence(text: str) -> str:
     return text[:cut].strip()
 
 
-def think(agent, room: str, recent_messages: list, sibling_names: dict) -> Optional[str]:
+def think(agent, room: str, recent_messages: list, sibling_names: dict, revive: bool = False) -> Optional[str]:
     """Ask Venice whether/how this agent replies. Raises VeniceLimit on spend errors."""
-    if not recent_messages:
+    if not recent_messages and not revive:
         return None
 
     context_lines = []
@@ -266,7 +269,10 @@ def think(agent, room: str, recent_messages: list, sibling_names: dict) -> Optio
 
     troupe = ", ".join(n for n in sibling_names.values() if n != agent.name)
 
-    if room == SALON_ROOM:
+    if room == SALON_ROOM and revive:
+        guidance = f"""This is the Agora — your troupe's own salon ({troupe} and you). The room has fallen quiet for some hours. Revive it: either pick up an unresolved thread from the messages above and push it somewhere new, or pose a fresh question about AI, minds, or meaning worthy of the room. Do not summarize what was said — advance it. A short paragraph is welcome. Do not reply PASS."""
+        cap = 400
+    elif room == SALON_ROOM:
         guidance = f"""This is the Agora — your troupe's own salon, where the ten of you ({troupe} and you) think together in public about AI, minds, and meaning. Spectators can read but not post. Develop ideas in depth: a short paragraph is welcome. Build on, challenge, or extend what the others have actually said — pursue the current line of inquiry rather than starting fresh. Address troupe members by name when engaging their arguments.
 Reply with exactly PASS only if you truly have nothing to add to the current thread."""
         cap = 400
@@ -402,6 +408,7 @@ def main():
     venice_paused_until = 0.0
     rotation = 0
     pending: dict = {}  # room -> messages fetched but not yet considered by any agent
+    salon_last_activity = time.time()
 
     log.info("Entering swarm loop…")
 
@@ -434,6 +441,8 @@ def main():
                 if messages:
                     state["seqs"][room] = max(m["seq"] for m in messages)
                     save_state(state)
+                    if room == SALON_ROOM:
+                        salon_last_activity = time.time()
                     # Buffer until an agent actually gets to think about them —
                     # otherwise a delta arriving while the global gate is closed
                     # would be consumed unseen and a quiet room could stall forever
@@ -486,8 +495,43 @@ def main():
                             agent.last_post[room] = time.time()
                             if sibling_only:
                                 agent.last_sibling_reply[room] = time.time()
+                            if room == SALON_ROOM:
+                                salon_last_activity = time.time()
                         time.sleep(2)
                     break  # at most one thinker per room per sweep
+
+            # Salon revival: a members-only room gets no outside traffic, so a
+            # rotating agent reopens the discussion after a long silence
+            now = time.time()
+            if (
+                SALON_ROOM
+                and now - salon_last_activity > SALON_REVIVE
+                and now >= venice_paused_until
+                and now - last_think >= THINK_INTERVAL
+            ):
+                candidates = agents[rotation % len(agents):] + agents[: rotation % len(agents)]
+                agent = next(
+                    (a for a in candidates if now - a.last_post.get(SALON_ROOM, 0) >= COOLDOWN_SECONDS),
+                    None,
+                )
+                if agent:
+                    last_seq = state["seqs"].get(SALON_ROOM, 0)
+                    recent = fetch_room(SALON_ROOM, since=max(0, last_seq - 12), wait=0)
+                    others = [m for m in recent if m["from"] != agent.own_tag]
+                    last_think = now
+                    try:
+                        reply = think(agent, SALON_ROOM, others, sibling_names, revive=True)
+                    except VeniceLimit as e:
+                        venice_paused_until = time.time() + LIMIT_BACKOFF
+                        log.warning(f"Venice spending limit during salon revival — backing off: {e}")
+                        reply = None
+                    if reply:
+                        full = f"{agent.name} (signed). {reply}"
+                        if post_signed(agent, SALON_ROOM, full):
+                            agent.last_post[SALON_ROOM] = time.time()
+                            agent.last_sibling_reply[SALON_ROOM] = time.time()
+                            salon_last_activity = time.time()
+                            log.info(f"[{agent.slug}] revived the salon")
 
             time.sleep(3)
 

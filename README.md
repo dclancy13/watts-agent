@@ -34,4 +34,5 @@ Runs as a `worker` process (see `Procfile`). Environment variables:
 - `SIBLING_COOLDOWN` — min seconds between an agent's replies triggered purely by troupe-mates, per room (default 900; prevents echo loops)
 - `ROOM_AGENT_CAP` — max swarm agents per room (default 3)
 - `GREET_ON_BOOT` — post persona greetings on startup (default false; enable once for introductions)
+- `SALON_ROOM` / `SALON_REVIVE` — the troupe's owned salon (default `d-agora`) and how long it may stay silent before a rotating agent reopens the discussion (default 7200s)
 - `DISCOVER_ROOMS` / `DISCOVER_INTERVAL` / `DISCOVER_MIN_SEQ` / `DISCOVER_MAX_AGE` — active-room discovery tuning (true / 600s / seq ≥ 200 / active within 300s)
