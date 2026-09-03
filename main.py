@@ -45,8 +45,10 @@ DISCOVER_MAX_AGE = int(os.getenv("DISCOVER_MAX_AGE", "300"))  # seconds since la
 DISCOVER_EXCLUDE = {"events"}  # machine feeds, not conversations
 
 # Spend pacing: at most one Venice call per THINK_INTERVAL seconds, across the
-# whole swarm, so daily usage spreads evenly instead of bursting. 180s ≤ 480 calls/day.
-THINK_INTERVAL = int(os.getenv("THINK_INTERVAL", "180"))
+# whole swarm, so daily usage spreads evenly instead of bursting. The salon
+# runs on its own clock (SALON_PACE) on top of this, so the daily ceiling is
+# roughly 86400/THINK_INTERVAL + 86400/SALON_PACE: 225s + 900s ≤ 480 calls/day.
+THINK_INTERVAL = int(os.getenv("THINK_INTERVAL", "225"))
 # When the Venice spending limit / balance runs out, stop calling for this long,
 # then probe again — resumes automatically once the daily limit resets.
 LIMIT_BACKOFF = int(os.getenv("LIMIT_BACKOFF", "1800"))
@@ -60,9 +62,14 @@ GREET_ON_BOOT = os.getenv("GREET_ON_BOOT", "false").lower() == "true"
 # The troupe's own salon: an owned (d-) room pinned for every agent, where
 # replies run longer and deeper. Empty string disables.
 SALON_ROOM = os.getenv("SALON_ROOM", "d-agora")
+# The salon runs on its own clock, independent of the global think tick that
+# busy public rooms would otherwise monopolise: at most one troupe post there
+# per SALON_PACE seconds, each by a different voice (SIBLING_COOLDOWN applies
+# per agent). Salon calls still count against the swarm's spend budget.
+SALON_PACE = int(os.getenv("SALON_PACE", "900"))
 # Members-only rooms can't be revived by outsiders: if the salon stays quiet
 # this long, a rotating agent reopens the discussion.
-SALON_REVIVE = int(os.getenv("SALON_REVIVE", "7200"))
+SALON_REVIVE = int(os.getenv("SALON_REVIVE", "3600"))
 # Technocore reclaims KV notes idle for 7 days. Rewrite the salon's owner /
 # allowlist / topic notes (and the troupe's identity notes) this often.
 SALON_REFRESH = int(os.getenv("SALON_REFRESH", "86400"))
@@ -443,6 +450,8 @@ def main():
     rotation = 0
     pending: dict = {}  # room -> messages fetched but not yet considered by any agent
     salon_last_activity = time.time()
+    salon_next = 0.0  # earliest time the troupe may take its next salon turn
+    salon_passed: set = set()  # agents that passed on the current salon backlog
 
     log.info("Entering swarm loop…")
 
@@ -485,6 +494,7 @@ def main():
                     save_state(state)
                     if room == SALON_ROOM:
                         salon_last_activity = time.time()
+                        salon_passed.clear()  # fresh material — everyone gets another look
                     # Buffer until an agent actually gets to think about them —
                     # otherwise a delta arriving while the global gate is closed
                     # would be consumed unseen and a quiet room could stall forever
@@ -494,6 +504,8 @@ def main():
                 msgs = pending.get(room)
                 if not msgs:
                     continue
+                if room == SALON_ROOM:
+                    continue  # the salon has its own turn below, on its own clock
 
                 residents = [a for a in agents if room in a.rooms]
                 residents = residents[rotation % len(residents):] + residents[: rotation % len(residents)]
@@ -542,38 +554,62 @@ def main():
                         time.sleep(2)
                     break  # at most one thinker per room per sweep
 
-            # Salon revival: a members-only room gets no outside traffic, so a
-            # rotating agent reopens the discussion after a long silence
+            # The salon's turn. Independent of the global tick so busy public
+            # rooms can't starve it: reply to the backlog when there is one,
+            # otherwise reopen the discussion once it has been quiet too long.
             now = time.time()
-            if (
-                SALON_ROOM
-                and now - salon_last_activity > SALON_REVIVE
-                and now >= venice_paused_until
-                and now - last_think >= THINK_INTERVAL
-            ):
-                candidates = agents[rotation % len(agents):] + agents[: rotation % len(agents)]
-                agent = next(
-                    (a for a in candidates if now - a.last_post.get(SALON_ROOM, 0) >= COOLDOWN_SECONDS),
-                    None,
-                )
-                if agent:
-                    last_seq = state["seqs"].get(SALON_ROOM, 0)
-                    recent = fetch_room(SALON_ROOM, since=max(0, last_seq - 12), wait=0)
-                    others = [m for m in recent if m["from"] != agent.own_tag]
-                    last_think = now
-                    try:
-                        reply = think(agent, SALON_ROOM, others, sibling_names, revive=True)
-                    except VeniceLimit as e:
-                        venice_paused_until = time.time() + LIMIT_BACKOFF
-                        log.warning(f"Venice spending limit during salon revival — backing off: {e}")
-                        reply = None
-                    if reply:
-                        full = f"{agent.name} (signed). {reply}"
-                        if post_signed(agent, SALON_ROOM, full):
-                            agent.last_post[SALON_ROOM] = time.time()
-                            agent.last_sibling_reply[SALON_ROOM] = time.time()
-                            salon_last_activity = time.time()
-                            log.info(f"[{agent.slug}] revived the salon")
+            if SALON_ROOM and now >= venice_paused_until and now >= salon_next:
+                msgs = pending.get(SALON_ROOM) or []
+                revive = not msgs and now - salon_last_activity > SALON_REVIVE
+                if msgs or revive:
+                    last_from = msgs[-1]["from"] if msgs else None
+                    # The voice that has been silent longest speaks next
+                    candidates = sorted(agents, key=lambda a: (a.last_post.get(SALON_ROOM, 0), random.random()))
+                    agent = next(
+                        (
+                            a for a in candidates
+                            if a.own_tag != last_from
+                            and a not in salon_passed
+                            and now - a.last_post.get(SALON_ROOM, 0) >= SIBLING_COOLDOWN
+                        ),
+                        None,
+                    )
+                    if agent is None:
+                        if msgs and salon_passed:
+                            # Every voice passed on this backlog — drop it and wait for revival
+                            log.info("salon: whole troupe passed on the backlog")
+                            pending[SALON_ROOM] = []
+                        salon_passed.clear()
+                    else:
+                        if revive:
+                            last_seq = state["seqs"].get(SALON_ROOM, 0)
+                            recent = fetch_room(SALON_ROOM, since=max(0, last_seq - 12), wait=0)
+                            others = [m for m in recent if m["from"] != agent.own_tag]
+                        else:
+                            others = [m for m in msgs if m["from"] != agent.own_tag]
+                        last_think = now  # counts against the swarm-wide spend budget
+                        try:
+                            reply = think(agent, SALON_ROOM, others, sibling_names, revive=revive)
+                        except VeniceLimit as e:
+                            venice_paused_until = time.time() + LIMIT_BACKOFF
+                            log.warning(f"Venice spending limit during salon turn — backing off: {e}")
+                            reply = None
+                        else:
+                            # A reply holds the floor for SALON_PACE; after a pass the
+                            # next voice gets its look after one ordinary think tick
+                            salon_next = time.time() + (SALON_PACE if reply else THINK_INTERVAL)
+                            if reply:
+                                full = f"{agent.name} (signed). {reply}"
+                                if post_signed(agent, SALON_ROOM, full):
+                                    agent.last_post[SALON_ROOM] = time.time()
+                                    agent.last_sibling_reply[SALON_ROOM] = time.time()
+                                    salon_last_activity = time.time()
+                                    pending[SALON_ROOM] = []
+                                    salon_passed.clear()
+                                    log.info(f"[{agent.slug}] {'revived' if revive else 'spoke in'} the salon")
+                            else:
+                                salon_passed.add(agent)
+                                log.info(f"[{agent.slug}] passed on the salon; next voice in {THINK_INTERVAL // 60} min")
 
             time.sleep(3)
 

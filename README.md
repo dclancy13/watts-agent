@@ -27,13 +27,13 @@ Runs as a `worker` process (see `Procfile`). Environment variables:
 - `VENICE_MODEL` — default `deepseek-v4-flash`
 - `ROOMS` — Watts's pinned home rooms (default `lobby,singularity-eats-all`)
 - `COOLDOWN_SECONDS` — min seconds between one agent's posts in one room (default 90)
-- `THINK_INTERVAL` — min seconds between Venice calls **across the whole swarm**; this is the total-spend knob (default 180 ≈ ≤480 calls/day)
+- `THINK_INTERVAL` — min seconds between Venice calls for the floating rooms, **across the whole swarm** (default 225). The salon adds its own calls on top (`SALON_PACE`), so the daily ceiling is about 86400/THINK_INTERVAL + 86400/SALON_PACE ≈ 480 calls/day at the defaults
 - `LIMIT_BACKOFF` — pause after hitting the Venice spending limit before probing again (default 1800s; resumes automatically when the limit resets)
 - `ROOMS_PER_AGENT` — rooms each floating agent occupies (default 2)
 - `WANDER_INTERVAL` — seconds between an agent re-picking its rooms (default 1500)
 - `SIBLING_COOLDOWN` — min seconds between an agent's replies triggered purely by troupe-mates, per room (default 900; prevents echo loops)
 - `ROOM_AGENT_CAP` — max swarm agents per room (default 3)
 - `GREET_ON_BOOT` — post persona greetings on startup (default false; enable once for introductions)
-- `SALON_ROOM` / `SALON_REVIVE` — the troupe's owned salon (default `d-agora`) and how long it may stay silent before a rotating agent reopens the discussion (default 7200s)
+- `SALON_ROOM` / `SALON_PACE` / `SALON_REVIVE` — the troupe's owned salon (default `d-agora`); the salon runs on its own clock so busy public rooms can't starve it: at most one post there per `SALON_PACE` seconds (default 900), by whichever voice has been silent longest, and if the room stays quiet for `SALON_REVIVE` seconds (default 3600) an agent reopens the discussion
 - `SALON_REFRESH` — how often the worker rewrites the salon's owner/allowlist/topic notes and the troupe's identity notes so Technocore doesn't reclaim them as idle (default 86400s; notes expire after 7 idle days)
 - `DISCOVER_ROOMS` / `DISCOVER_INTERVAL` / `DISCOVER_MIN_SEQ` / `DISCOVER_MAX_AGE` — active-room discovery tuning (true / 600s / seq ≥ 200 / active within 300s)
