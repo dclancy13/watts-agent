@@ -63,6 +63,9 @@ SALON_ROOM = os.getenv("SALON_ROOM", "d-agora")
 # Members-only rooms can't be revived by outsiders: if the salon stays quiet
 # this long, a rotating agent reopens the discussion.
 SALON_REVIVE = int(os.getenv("SALON_REVIVE", "7200"))
+# Technocore reclaims KV notes idle for 7 days. Rewrite the salon's owner /
+# allowlist / topic notes (and the troupe's identity notes) this often.
+SALON_REFRESH = int(os.getenv("SALON_REFRESH", "86400"))
 
 if not VENICE_API_KEY:
     raise SystemExit("VENICE_API_KEY is required")
@@ -145,6 +148,35 @@ def publish_identity(agent):
         log.info(f"[{agent.slug}] identity note → /kv/did/{fp} ({r.status_code})")
     except Exception as e:
         log.warning(f"[{agent.slug}] failed to publish identity: {e}")
+
+
+def refresh_salon_notes(agents: list) -> None:
+    """Rewrite the salon's KV notes so they never expire as idle.
+
+    Same as `python salon.py refresh`: the owner note, the allowlist (merged
+    with whatever is already listed, so admitted outsiders survive) and both
+    topics. Nothing is posted to any room.
+    """
+    if not SALON_ROOM:
+        return
+    from salon import signed_note, set_topic, SALON_TOPIC, ANTECHAMBER_TOPIC, ANTECHAMBER
+
+    owner = next((a for a in agents if a.slug == "watts"), agents[0])
+    try:
+        r = client_http.get(f"{TECHNOCORE}/kv/room-allow/{SALON_ROOM}")
+        dids = [w for w in r.text.split() if w.startswith("did:key:")] if r.status_code == 200 else []
+        for a in agents:
+            if a.did not in dids:
+                dids.append(a.did)
+
+        r = signed_note(owner.private_key, owner.did, "room-owners", SALON_ROOM, owner.did)
+        log.info(f"salon refresh: owner note {r.status_code}")
+        r = signed_note(owner.private_key, owner.did, "room-allow", SALON_ROOM, " ".join(dids))
+        log.info(f"salon refresh: allowlist ({len(dids)} DIDs) {r.status_code}")
+        log.info(f"salon refresh: topics {set_topic(SALON_ROOM, SALON_TOPIC).status_code}/"
+                 f"{set_topic(ANTECHAMBER, ANTECHAMBER_TOPIC).status_code}")
+    except Exception as e:
+        log.warning(f"salon refresh failed: {e}")
 
 
 def fetch_room(room: str, since: int = 0, wait: int = 1) -> list:
@@ -388,6 +420,8 @@ def main():
     for a in agents:
         log.info(f"[{a.slug}] {a.did}")
         publish_identity(a)
+    refresh_salon_notes(agents)
+    last_refresh = time.time()
 
     # Initial room assignment, staggered wander clocks so moves don't sync up
     active = discover_active_rooms() if DISCOVER_ROOMS else []
@@ -418,6 +452,14 @@ def main():
             if DISCOVER_ROOMS and now - last_discovery >= DISCOVER_INTERVAL:
                 last_discovery = now
                 active = discover_active_rooms()
+
+            # Daily upkeep: keep the salon's notes and our identity notes from
+            # being reclaimed as idle
+            if now - last_refresh >= SALON_REFRESH:
+                last_refresh = now
+                for a in agents:
+                    publish_identity(a)
+                refresh_salon_notes(agents)
 
             for a in agents:
                 if now >= a.next_wander:

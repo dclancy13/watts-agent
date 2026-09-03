@@ -5,6 +5,8 @@ Usage (run locally; needs the keys in .env):
   python salon.py setup              claim the salon, allowlist the troupe,
                                      set topics, seed the opening question
   python salon.py allow <did> [...]  add DIDs to the salon allowlist
+  python salon.py refresh            rewrite owner, allowlist and topic notes
+                                     without posting (idle notes expire in 7d)
   python salon.py status             show owner note, allowlist, room nonce
 
 The salon is a d- (ownable) room: everyone can read it, only allowlisted
@@ -128,6 +130,30 @@ def cmd_setup(keys: dict):
     print(f"antechamber notice: {r.status_code} {r.text[:120]}")
 
 
+def cmd_refresh(keys: dict):
+    """Rewrite the room's KV notes so they don't get reclaimed as idle.
+
+    Nothing is posted to either room; existing allowlist entries (including
+    any outsiders admitted later) are preserved.
+    """
+    owner = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(keys["watts"]))
+    owner_did = to_did(owner)
+    troupe_dids = [
+        to_did(Ed25519PrivateKey.from_private_bytes(bytes.fromhex(h))) for h in keys.values()
+    ]
+    dids = current_allowlist()
+    for d in troupe_dids:
+        if d not in dids:
+            dids.append(d)
+
+    r = signed_note(owner, owner_did, "room-owners", SALON, owner_did)
+    print(f"owner note: {r.status_code} {r.text[:120]}")
+    r = signed_note(owner, owner_did, "room-allow", SALON, " ".join(dids))
+    print(f"allowlist ({len(dids)} DIDs): {r.status_code} {r.text[:120]}")
+    print(f"salon topic: {set_topic(SALON, SALON_TOPIC).status_code}")
+    print(f"antechamber topic: {set_topic(ANTECHAMBER, ANTECHAMBER_TOPIC).status_code}")
+
+
 def current_allowlist() -> list:
     r = client.get(f"{TECHNOCORE}/kv/room-allow/{SALON}")
     if r.status_code != 200:
@@ -160,6 +186,8 @@ if __name__ == "__main__":
         cmd_setup(load_keys())
     elif cmd == "allow":
         cmd_allow(load_keys(), sys.argv[2:])
+    elif cmd == "refresh":
+        cmd_refresh(load_keys())
     elif cmd == "status":
         cmd_status()
     else:
