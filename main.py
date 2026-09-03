@@ -339,6 +339,10 @@ Recent messages:
             temperature=0.85,
         )
         text = resp.choices[0].message.content.strip()
+        # The model sometimes echoes the byline we prepend on posting — drop it
+        for prefix in (f"{agent.name} (signed).", f"{agent.name} (signed)", f"{agent.name}:"):
+            if text.lower().startswith(prefix.lower()):
+                text = text[len(prefix):].lstrip(" .:—-")
         if text.upper() == "PASS" or len(text) < 3:
             return None
         return trim_to_sentence(text)
